@@ -96,4 +96,18 @@ def create_app(config_class=Config):
     def health_check():
         return jsonify({'status': 'healthy', 'app': 'VyaparaCore'})
 
+    # One-time seed endpoint (delete after use)
+    @app.route('/api/seed/<secret>')
+    def run_seed(secret):
+        # Use your SECRET_KEY first 8 chars as seed password
+        expected = app.config.get('SECRET_KEY', '')[:8]
+        if secret != expected:
+            return jsonify({'error': 'Invalid secret'}), 403
+        try:
+            from seeds import run_all_seeds
+            run_all_seeds()
+            return jsonify({'status': 'success', 'message': 'Database seeded!'})
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': str(e)}), 500
+
     return app
