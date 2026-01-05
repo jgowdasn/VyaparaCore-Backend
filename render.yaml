@@ -19,6 +19,10 @@ services:
     envVars:
       - key: FLASK_ENV
         value: production
+      - key: FLASK_APP
+        value: run.py
+      - key: PYTHONPATH
+        value: /opt/render/project/src
       - key: SECRET_KEY
         generateValue: true
       - key: JWT_SECRET_KEY
