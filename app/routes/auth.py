@@ -2,7 +2,7 @@
 from flask import Blueprint, request, g
 from datetime import datetime, timedelta
 from flask_jwt_extended import (
-    create_access_token, create_refresh_token, 
+    create_access_token, create_refresh_token,
     jwt_required, get_jwt_identity, get_jwt
 )
 from config.database import db
@@ -13,6 +13,10 @@ from app.utils.security import (
     rate_limit, create_audit_log
 )
 from app.utils.helpers import success_response, error_response
+from app.services.activity_logger import (
+    log_activity, log_login, log_logout,
+    ActivityType, EntityType
+)
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -105,9 +109,19 @@ def register():
         user.verification_token_expires = datetime.utcnow() + timedelta(hours=24)
         
         db.session.commit()
-        
+
+        # Log registration activity
+        log_activity(
+            activity_type=ActivityType.REGISTER,
+            description=f"New organization '{org.name}' registered by {user.email}",
+            entity_type=EntityType.ORGANIZATION,
+            entity_id=org.id,
+            user_id=user.id,
+            organization_id=org.id
+        )
+
         # TODO: Send verification email
-        
+
         # Create tokens
         access_token = create_access_token(
             identity=str(user.id),
@@ -118,7 +132,7 @@ def register():
             }
         )
         refresh_token = create_refresh_token(identity=str(user.id))
-        
+
         return success_response({
             'message': 'Registration successful',
             'user': {
@@ -133,7 +147,7 @@ def register():
             'access_token': access_token,
             'refresh_token': refresh_token
         }, 201)
-        
+
     except Exception as e:
         db.session.rollback()
         return error_response(f'Registration failed: {str(e)}', 500)
@@ -171,19 +185,15 @@ def login():
             return error_response('Account locked due to too many failed attempts', 423)
         
         db.session.commit()
-        
+
         # Log failed attempt
-        login_history = LoginHistory(
+        log_login(
             user_id=user.id,
             organization_id=user.organization_id,
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string[:500] if request.user_agent else None,
             status='failed',
             failure_reason='Invalid password'
         )
-        db.session.add(login_history)
-        db.session.commit()
-        
+
         return error_response('Invalid email or password', 401)
     
     # Check if user is active
@@ -202,14 +212,21 @@ def login():
     user.last_login_ip = request.remote_addr
     
     # Log successful login
-    login_history = LoginHistory(
+    log_login(
         user_id=user.id,
         organization_id=user.organization_id,
-        ip_address=request.remote_addr,
-        user_agent=request.user_agent.string[:500] if request.user_agent else None,
         status='success'
     )
-    db.session.add(login_history)
+
+    log_activity(
+        activity_type=ActivityType.LOGIN,
+        description=f"User {user.email} logged in",
+        entity_type=EntityType.USER,
+        entity_id=user.id,
+        user_id=user.id,
+        organization_id=user.organization_id
+    )
+
     db.session.commit()
     
     # Create tokens
@@ -281,6 +298,20 @@ def refresh():
 @jwt_required()
 def logout():
     """User logout"""
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+
+    if user:
+        log_logout(user_id=user.id)
+        log_activity(
+            activity_type=ActivityType.LOGOUT,
+            description=f"User {user.email} logged out",
+            entity_type=EntityType.USER,
+            entity_id=user.id,
+            user_id=user.id,
+            organization_id=user.organization_id
+        )
+
     # In a production app, you'd blacklist the token here
     return success_response({'message': 'Logged out successfully'})
 
@@ -386,7 +417,16 @@ def change_password():
     user.password_hash = hash_password(data['new_password'])
     user.password_changed_at = datetime.utcnow()
     db.session.commit()
-    
+
+    log_activity(
+        activity_type=ActivityType.PASSWORD_CHANGE,
+        description=f"User {user.email} changed their password",
+        entity_type=EntityType.USER,
+        entity_id=user.id,
+        user_id=user.id,
+        organization_id=user.organization_id
+    )
+
     return success_response({'message': 'Password changed successfully'})
 
 
@@ -442,9 +482,18 @@ def reset_password():
     user.reset_token_expires = None
     user.failed_login_attempts = 0
     user.locked_until = None
-    
+
     db.session.commit()
-    
+
+    log_activity(
+        activity_type=ActivityType.PASSWORD_RESET,
+        description=f"User {user.email} reset their password",
+        entity_type=EntityType.USER,
+        entity_id=user.id,
+        user_id=user.id,
+        organization_id=user.organization_id
+    )
+
     return success_response({'message': 'Password reset successfully'})
 
 

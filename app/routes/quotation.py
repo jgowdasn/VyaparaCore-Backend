@@ -14,6 +14,7 @@ from app.utils.helpers import (
     success_response, error_response, get_request_json,
     paginate, get_filters, apply_filters, model_to_dict
 )
+from app.services.activity_logger import log_activity, log_audit, ActivityType, EntityType
 
 quotation_bp = Blueprint('quotation', __name__)
 
@@ -283,7 +284,13 @@ def create_quotation():
     db.session.commit()
     
     create_audit_log('quotations', quotation.id, 'create', None, model_to_dict(quotation))
-    
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        entity_type=EntityType.QUOTATION,
+        entity_id=quotation.id,
+        description=f"Created quotation {quotation.quotation_number} for {customer.name}"
+    )
+
     return success_response(model_to_dict(quotation), 'Quotation created', 201)
 
 
@@ -442,8 +449,14 @@ def update_quotation(id):
     quotation.updated_by = g.current_user.id
     
     create_audit_log('quotations', quotation.id, 'update', old_values, model_to_dict(quotation))
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.QUOTATION,
+        entity_id=quotation.id,
+        description=f"Updated quotation {quotation.quotation_number}"
+    )
     db.session.commit()
-    
+
     return success_response(model_to_dict(quotation), 'Quotation updated')
 
 
@@ -459,11 +472,19 @@ def delete_quotation(id):
     if quotation.status not in ['draft']:
         return error_response('Can only delete draft quotations')
     
+    quotation_number = quotation.quotation_number
+    quotation_id = quotation.id
     QuotationTerms.query.filter_by(quotation_id=quotation.id).delete()
     QuotationItem.query.filter_by(quotation_id=quotation.id).delete()
     db.session.delete(quotation)
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.DELETE,
+        entity_type=EntityType.QUOTATION,
+        entity_id=quotation_id,
+        description=f"Deleted quotation {quotation_number}"
+    )
+
     return success_response(message='Quotation deleted')
 
 
@@ -480,9 +501,15 @@ def send_quotation(id):
     quotation.sent_at = datetime.utcnow()
     quotation.updated_at = datetime.utcnow()
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.STATUS_CHANGE,
+        entity_type=EntityType.QUOTATION,
+        entity_id=quotation.id,
+        description=f"Sent quotation {quotation.quotation_number}"
+    )
+
     # TODO: Send email to customer
-    
+
     return success_response(model_to_dict(quotation), 'Quotation sent')
 
 
@@ -502,7 +529,13 @@ def accept_quotation(id):
     quotation.accepted_at = datetime.utcnow()
     quotation.updated_at = datetime.utcnow()
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.STATUS_CHANGE,
+        entity_type=EntityType.QUOTATION,
+        entity_id=quotation.id,
+        description=f"Accepted quotation {quotation.quotation_number}"
+    )
+
     return success_response(model_to_dict(quotation), 'Quotation accepted')
 
 
@@ -522,7 +555,13 @@ def reject_quotation(id):
     quotation.rejected_at = datetime.utcnow()
     quotation.updated_at = datetime.utcnow()
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.STATUS_CHANGE,
+        entity_type=EntityType.QUOTATION,
+        entity_id=quotation.id,
+        description=f"Rejected quotation {quotation.quotation_number}"
+    )
+
     return success_response(model_to_dict(quotation), 'Quotation rejected')
 
 
@@ -632,7 +671,13 @@ def convert_to_order(id):
     quotation.updated_at = datetime.utcnow()
     
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.STATUS_CHANGE,
+        entity_type=EntityType.QUOTATION,
+        entity_id=quotation.id,
+        description=f"Converted quotation {quotation.quotation_number} to sales order {order.order_number}"
+    )
+
     return success_response({
         'quotation_id': quotation.id,
         'sales_order_id': order.id,

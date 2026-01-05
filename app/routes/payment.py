@@ -6,7 +6,7 @@ from config.database import db
 from app.models import (
     Payment, PaymentAllocation, PaymentMode, BankAccount,
     Invoice, Customer, Supplier, SequenceNumber, InvoiceSettings,
-    PurchaseOrder, DebitNote
+    PurchaseOrder, DebitNote, SalesOrder
 )
 from app.utils.security import (
     jwt_required_with_user, permission_required, sanitize_string, create_audit_log
@@ -15,6 +15,7 @@ from app.utils.helpers import (
     success_response, error_response, get_request_json,
     paginate, get_filters, apply_filters, model_to_dict
 )
+from app.services.activity_logger import log_activity, log_audit, ActivityType, EntityType
 
 payment_bp = Blueprint('payment', __name__)
 
@@ -301,6 +302,14 @@ def create_payment():
                     invoice.status = 'paid'
                     invoice.payment_status = 'paid'
                     invoice.paid_at = datetime.utcnow()
+
+                    # Update Sales Order status to delivered when invoice is fully paid
+                    if invoice.sales_order_id:
+                        sales_order = SalesOrder.query.get(invoice.sales_order_id)
+                        if sales_order and sales_order.status not in ['delivered', 'cancelled']:
+                            sales_order.status = 'delivered'
+                            sales_order.delivered_at = datetime.utcnow()
+                            sales_order.updated_at = datetime.utcnow()
                 else:
                     invoice.status = 'partial'
                     invoice.payment_status = 'partial'
@@ -374,7 +383,13 @@ def create_payment():
     db.session.commit()
     
     create_audit_log('payments', payment.id, 'create', None, model_to_dict(payment))
-    
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        entity_type=EntityType.PAYMENT,
+        entity_id=payment.id,
+        description=f"Recorded {payment_type} of ₹{amount} for {party.name}"
+    )
+
     return success_response(model_to_dict(payment), 'Payment recorded', 201)
 
 
@@ -460,17 +475,31 @@ def allocate_payment(id):
             invoice.status = 'paid'
             invoice.payment_status = 'paid'
             invoice.paid_at = datetime.utcnow()
+
+            # Update Sales Order status to delivered when invoice is fully paid
+            if invoice.sales_order_id:
+                sales_order = SalesOrder.query.get(invoice.sales_order_id)
+                if sales_order and sales_order.status not in ['delivered', 'cancelled']:
+                    sales_order.status = 'delivered'
+                    sales_order.delivered_at = datetime.utcnow()
+                    sales_order.updated_at = datetime.utcnow()
         else:
             invoice.status = 'partial'
             invoice.payment_status = 'partial'
 
         total_allocated += alloc_amount
-    
+
     payment.allocated_amount = float(Decimal(str(payment.allocated_amount or 0)) + total_allocated)
     payment.unallocated_amount = float(Decimal(str(payment.amount or 0)) - Decimal(str(payment.allocated_amount or 0)))
     
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.PAYMENT,
+        entity_id=payment.id,
+        description=f"Allocated payment {payment.payment_number}"
+    )
+
     return success_response(model_to_dict(payment), 'Payment allocated')
 
 
@@ -526,9 +555,15 @@ def cancel_payment(id):
     payment.cancelled_at = datetime.utcnow()
     payment.cancelled_by = g.current_user.id
     payment.updated_at = datetime.utcnow()
-    
+
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.STATUS_CHANGE,
+        entity_type=EntityType.PAYMENT,
+        entity_id=payment.id,
+        description=f"Cancelled payment {payment.payment_number}"
+    )
+
     return success_response(model_to_dict(payment), 'Payment cancelled')
 
 

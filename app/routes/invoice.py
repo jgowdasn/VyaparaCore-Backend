@@ -15,6 +15,7 @@ from app.utils.helpers import (
     success_response, error_response, get_request_json,
     paginate, get_filters, apply_filters, model_to_dict
 )
+from app.services.activity_logger import log_activity, log_audit, ActivityType, EntityType
 
 invoice_bp = Blueprint('invoice', __name__)
 
@@ -267,32 +268,49 @@ def create_invoice():
                 variant_id=item_data.get('variant_id'),
                 warehouse_id=warehouse_id
             ).first()
-            
+
             if stock:
                 balance_before = float(stock.quantity or 0)
-                stock.quantity = max(0, balance_before - float(qty))
-                
+                deduct_qty = float(qty)
+
+                # If invoice is from a Sales Order, also release reserved stock
+                if invoice.sales_order_id:
+                    reserved_before = float(stock.reserved_quantity or 0)
+                    release_qty = min(deduct_qty, reserved_before)
+                    stock.reserved_quantity = max(0, reserved_before - release_qty)
+
+                # Deduct from actual stock
+                stock.quantity = max(0, balance_before - deduct_qty)
+                stock.available_quantity = float(stock.quantity) - float(stock.reserved_quantity or 0)
+
+                # Generate transaction number
+                txn_count = StockTransaction.query.filter_by(
+                    organization_id=g.organization_id
+                ).count()
+
                 txn = StockTransaction(
                     organization_id=g.organization_id,
+                    transaction_number=f"SALE{datetime.utcnow().strftime('%y%m')}{txn_count + 1:05d}",
                     product_id=product.id,
                     variant_id=item_data.get('variant_id'),
                     warehouse_id=warehouse_id,
                     transaction_type='sale',
-                    quantity=float(qty),
+                    quantity=deduct_qty,
                     direction='out',
                     balance_before=balance_before,
-                    balance_after=stock.quantity,
+                    balance_after=float(stock.quantity),
                     unit_cost=float(unit_price),
                     reference_type='invoice',
                     reference_id=invoice.id,
+                    reference_number=invoice.invoice_number,
                     transaction_date=invoice.invoice_date,
                     created_by=g.current_user.id
                 )
                 db.session.add(txn)
-                
+
                 # Update product stock
                 total_stock = db.session.query(db.func.sum(Stock.quantity)).filter_by(product_id=product.id).scalar() or 0
-                product.current_stock = total_stock
+                product.current_stock = float(total_stock)
     
     shipping = Decimal(str(data.get('shipping_charges', 0)))
     packaging = Decimal(str(data.get('packaging_charges', 0)))
@@ -321,9 +339,17 @@ def create_invoice():
     customer.outstanding_amount = float(customer.outstanding_amount or 0) + float(final_total)
     
     db.session.commit()
-    
-    create_audit_log('invoices', invoice.id, 'create', None, model_to_dict(invoice))
-    
+
+    log_audit('invoices', invoice.id, 'create', None, model_to_dict(invoice))
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        description=f"Created invoice {invoice.invoice_number} for {customer.name}",
+        entity_type=EntityType.INVOICE,
+        entity_id=invoice.id,
+        entity_number=invoice.invoice_number,
+        extra_data={'customer_id': customer.id, 'total': float(invoice.total_amount)}
+    )
+
     return success_response(model_to_dict(invoice), 'Invoice created', 201)
 
 
@@ -422,17 +448,101 @@ def update_invoice(id):
 @jwt_required_with_user()
 @permission_required('invoices.email')
 def send_invoice(id):
-    """Mark invoice as sent"""
+    """Send invoice via email"""
     invoice = Invoice.query.filter_by(id=id, organization_id=g.organization_id).first()
     if not invoice:
         return error_response('Invoice not found', status_code=404)
-    
+
+    org = Organization.query.get(g.organization_id)
+    customer = Customer.query.get(invoice.customer_id) if invoice.customer_id else None
+
+    # Email sending logic (commented out - enable when SMTP is configured)
+    # ------------------------------------------------------------------
+    # from flask_mail import Message
+    # from app import mail
+    #
+    # if customer and customer.email:
+    #     try:
+    #         msg = Message(
+    #             subject=f"Invoice {invoice.invoice_number} from {org.name}",
+    #             sender=org.email or 'noreply@example.com',
+    #             recipients=[customer.email]
+    #         )
+    #         msg.html = f"""
+    #         <h2>Invoice {invoice.invoice_number}</h2>
+    #         <p>Dear {customer.name},</p>
+    #         <p>Please find attached your invoice for ₹{invoice.total_amount:,.2f}</p>
+    #         <p>Due Date: {invoice.due_date}</p>
+    #         <br>
+    #         <p>Thank you for your business!</p>
+    #         <p>{org.name}</p>
+    #         """
+    #         # Attach PDF invoice here
+    #         # msg.attach(f"Invoice_{invoice.invoice_number}.pdf", "application/pdf", pdf_data)
+    #         mail.send(msg)
+    #     except Exception as e:
+    #         print(f"Email sending failed: {str(e)}")
+    # ------------------------------------------------------------------
+
+    # Update status
     invoice.status = 'sent'
     invoice.sent_at = datetime.utcnow()
     invoice.updated_at = datetime.utcnow()
     db.session.commit()
-    
-    return success_response(model_to_dict(invoice), 'Invoice sent')
+
+    log_activity(
+        activity_type=ActivityType.SEND,
+        description=f"Sent invoice {invoice.invoice_number} via email",
+        entity_type=EntityType.INVOICE,
+        entity_id=invoice.id,
+        entity_number=invoice.invoice_number
+    )
+
+    return success_response(model_to_dict(invoice), 'Invoice marked as sent')
+
+
+@invoice_bp.route('/<int:id>/whatsapp', methods=['GET'])
+@jwt_required_with_user()
+@permission_required('invoices.view')
+def get_whatsapp_link(id):
+    """Generate WhatsApp share link for invoice"""
+    invoice = Invoice.query.filter_by(id=id, organization_id=g.organization_id).first()
+    if not invoice:
+        return error_response('Invoice not found', status_code=404)
+
+    org = Organization.query.get(g.organization_id)
+    customer = Customer.query.get(invoice.customer_id) if invoice.customer_id else None
+
+    # Build WhatsApp message
+    message = f"""*Invoice {invoice.invoice_number}*
+From: {org.name if org else 'Our Company'}
+
+Customer: {invoice.customer_name}
+Date: {invoice.invoice_date}
+Due Date: {invoice.due_date or 'N/A'}
+
+*Amount: ₹{float(invoice.grand_total or 0):,.2f}*
+
+Thank you for your business!"""
+
+    # URL encode the message
+    import urllib.parse
+    encoded_message = urllib.parse.quote(message)
+
+    # Get customer phone (remove +91 or other prefixes for WhatsApp)
+    phone = ''
+    if customer and customer.phone:
+        phone = customer.phone.replace('+', '').replace(' ', '').replace('-', '')
+        if not phone.startswith('91') and len(phone) == 10:
+            phone = '91' + phone
+
+    whatsapp_url = f"https://wa.me/{phone}?text={encoded_message}"
+
+    return success_response({
+        'whatsapp_url': whatsapp_url,
+        'phone': phone,
+        'message': message
+    })
 
 
 @invoice_bp.route('/<int:id>/void', methods=['POST'])
@@ -460,7 +570,16 @@ def void_invoice(id):
     invoice.voided_by = g.current_user.id
     invoice.updated_at = datetime.utcnow()
     db.session.commit()
-    
+
+    log_activity(
+        activity_type=ActivityType.CANCEL,
+        description=f"Voided invoice {invoice.invoice_number}",
+        entity_type=EntityType.INVOICE,
+        entity_id=invoice.id,
+        entity_number=invoice.invoice_number,
+        extra_data={'reason': invoice.void_reason}
+    )
+
     return success_response(model_to_dict(invoice), 'Invoice voided')
 
 
@@ -700,6 +819,15 @@ def create_credit_note():
     credit_note.balance_amount = float(round(grand_total))
 
     db.session.commit()
+
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        description=f"Created credit note {credit_note.credit_note_number} for {customer.name}",
+        entity_type=EntityType.CREDIT_NOTE,
+        entity_id=credit_note.id,
+        entity_number=credit_note.credit_note_number,
+        extra_data={'customer_id': customer.id, 'total': float(credit_note.grand_total)}
+    )
 
     return success_response(model_to_dict(credit_note), 'Credit note created', 201)
 

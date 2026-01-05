@@ -13,6 +13,7 @@ from app.utils.helpers import (
     success_response, error_response, get_request_json,
     paginate, get_filters, apply_filters, model_to_dict
 )
+from app.services.activity_logger import log_activity, log_audit, ActivityType, EntityType
 
 inventory_bp = Blueprint('inventory', __name__)
 
@@ -72,7 +73,13 @@ def create_warehouse():
     
     db.session.add(warehouse)
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        entity_type=EntityType.INVENTORY,
+        entity_id=warehouse.id,
+        description=f"Created warehouse: {warehouse.name}"
+    )
+
     return success_response(model_to_dict(warehouse), 'Warehouse created', 201)
 
 
@@ -136,7 +143,13 @@ def update_warehouse(id):
     
     warehouse.updated_at = datetime.utcnow()
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.INVENTORY,
+        entity_id=warehouse.id,
+        description=f"Updated warehouse: {warehouse.name}"
+    )
+
     return success_response(model_to_dict(warehouse), 'Warehouse updated')
 
 
@@ -156,7 +169,13 @@ def delete_warehouse(id):
     warehouse.is_active = False
     warehouse.updated_at = datetime.utcnow()
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.DELETE,
+        entity_type=EntityType.INVENTORY,
+        entity_id=warehouse.id,
+        description=f"Deleted warehouse: {warehouse.name}"
+    )
+
     return success_response(message='Warehouse deleted')
 
 
@@ -484,7 +503,13 @@ def create_adjustment():
     db.session.commit()
     
     create_audit_log('stock_adjustments', adjustment.id, 'create', None, model_to_dict(adjustment))
-    
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        entity_type=EntityType.INVENTORY,
+        entity_id=adjustment.id,
+        description=f"Created stock adjustment {adjustment.adjustment_number}"
+    )
+
     return success_response(model_to_dict(adjustment), 'Stock adjustment created', 201)
 
 
@@ -582,7 +607,13 @@ def transfer_stock():
     db.session.add(txn_out)
     db.session.add(txn_in)
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.INVENTORY,
+        entity_id=data['product_id'],
+        description=f"Transferred {qty} units of product {product.name} between warehouses"
+    )
+
     return success_response({
         'product_id': data['product_id'],
         'quantity': qty,

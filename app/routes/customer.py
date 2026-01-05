@@ -12,6 +12,7 @@ from app.utils.helpers import (
     success_response, error_response, get_request_json,
     paginate, get_filters, apply_filters, model_to_dict
 )
+from app.services.activity_logger import log_activity, log_audit, ActivityType, EntityType
 
 customer_bp = Blueprint('customer', __name__)
 
@@ -152,9 +153,16 @@ def create_customer():
             db.session.add(contact)
     
     db.session.commit()
-    
-    create_audit_log('customers', customer.id, 'create', None, model_to_dict(customer))
-    
+
+    log_audit('customers', customer.id, 'create', None, model_to_dict(customer))
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        description=f"Created customer '{customer.name}' ({customer.code})",
+        entity_type=EntityType.CUSTOMER,
+        entity_id=customer.id,
+        entity_number=customer.code
+    )
+
     return success_response(model_to_dict(customer), 'Customer created', 201)
 
 
@@ -216,10 +224,18 @@ def update_customer(id):
     
     customer.updated_at = datetime.utcnow()
     customer.updated_by = g.current_user.id
-    
-    create_audit_log('customers', customer.id, 'update', old_values, model_to_dict(customer))
+
+    log_audit('customers', customer.id, 'update', old_values, model_to_dict(customer))
     db.session.commit()
-    
+
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        description=f"Updated customer '{customer.name}' ({customer.code})",
+        entity_type=EntityType.CUSTOMER,
+        entity_id=customer.id,
+        entity_number=customer.code
+    )
+
     return success_response(model_to_dict(customer), 'Customer updated')
 
 
@@ -238,10 +254,18 @@ def delete_customer(id):
     
     customer.is_active = False
     customer.updated_at = datetime.utcnow()
-    
-    create_audit_log('customers', customer.id, 'delete', model_to_dict(customer), None)
+
+    log_audit('customers', customer.id, 'delete', model_to_dict(customer), None)
     db.session.commit()
-    
+
+    log_activity(
+        activity_type=ActivityType.DELETE,
+        description=f"Deleted customer '{customer.name}' ({customer.code})",
+        entity_type=EntityType.CUSTOMER,
+        entity_id=customer.id,
+        entity_number=customer.code
+    )
+
     return success_response(message='Customer deleted')
 
 

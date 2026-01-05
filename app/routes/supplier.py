@@ -11,6 +11,7 @@ from app.utils.helpers import (
     success_response, error_response, get_request_json,
     paginate, get_filters, apply_filters, model_to_dict
 )
+from app.services.activity_logger import log_activity, log_audit, ActivityType, EntityType
 
 supplier_bp = Blueprint('supplier', __name__)
 
@@ -144,7 +145,13 @@ def create_supplier():
     db.session.commit()
     
     create_audit_log('suppliers', supplier.id, 'create', None, model_to_dict(supplier))
-    
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        entity_type=EntityType.SUPPLIER,
+        entity_id=supplier.id,
+        description=f"Created supplier: {supplier.name}"
+    )
+
     return success_response(model_to_dict(supplier), 'Supplier created', 201)
 
 
@@ -205,8 +212,14 @@ def update_supplier(id):
     supplier.updated_by = g.current_user.id
     
     create_audit_log('suppliers', supplier.id, 'update', old_values, model_to_dict(supplier))
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.SUPPLIER,
+        entity_id=supplier.id,
+        description=f"Updated supplier: {supplier.name}"
+    )
     db.session.commit()
-    
+
     return success_response(model_to_dict(supplier), 'Supplier updated')
 
 
@@ -226,8 +239,14 @@ def delete_supplier(id):
     supplier.updated_at = datetime.utcnow()
     
     create_audit_log('suppliers', supplier.id, 'delete', model_to_dict(supplier), None)
+    log_activity(
+        activity_type=ActivityType.DELETE,
+        entity_type=EntityType.SUPPLIER,
+        entity_id=supplier.id,
+        description=f"Deleted supplier: {supplier.name}"
+    )
     db.session.commit()
-    
+
     return success_response(message='Supplier deleted')
 
 

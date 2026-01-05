@@ -72,6 +72,8 @@ def create_app(config_class=Config):
     from app.routes.payment import payment_bp
     from app.routes.report import report_bp
     from app.routes.dashboard import dashboard_bp
+    from app.routes.activity import activity_bp
+    from app.routes.notification import notification_bp
 
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(organization_bp, url_prefix='/api/organizations')
@@ -86,6 +88,8 @@ def create_app(config_class=Config):
     app.register_blueprint(payment_bp, url_prefix='/api/payments')
     app.register_blueprint(report_bp, url_prefix='/api/reports')
     app.register_blueprint(dashboard_bp, url_prefix='/api/dashboard')
+    app.register_blueprint(activity_bp, url_prefix='/api/activities')
+    app.register_blueprint(notification_bp, url_prefix='/api/notifications')
 
     # Health check endpoint
     @app.route('/api/health')

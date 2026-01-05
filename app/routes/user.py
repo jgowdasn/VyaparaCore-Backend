@@ -8,8 +8,16 @@ from app.utils.security import (
     validate_password_strength, sanitize_html, create_audit_log
 )
 from app.utils.helpers import success_response, error_response, paginate
+from app.services.activity_logger import log_activity, log_audit, ActivityType, EntityType
 
 user_bp = Blueprint('user', __name__)
+
+
+def sanitize_input(value):
+    """Sanitize string input"""
+    if value is None:
+        return ''
+    return str(value).strip()
 
 
 # ==================== USER MANAGEMENT ====================
@@ -145,7 +153,13 @@ def create_user():
     db.session.commit()
     
     create_audit_log('users', user.id, 'create', None, data)
-    
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        entity_type=EntityType.USER,
+        entity_id=user.id,
+        description=f"Created user: {user.full_name}"
+    )
+
     return success_response({
         'id': user.id,
         'email': user.email,
@@ -263,9 +277,15 @@ def update_user(user_id):
         user.password_hash = hash_password(data['password'])
     
     db.session.commit()
-    
+
     create_audit_log('users', user.id, 'update', old_data, data)
-    
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.USER,
+        entity_id=user.id,
+        description=f"Updated user: {user.full_name}"
+    )
+
     return success_response({
         'id': user.id,
         'message': 'User updated successfully'
@@ -291,9 +311,15 @@ def delete_user(user_id):
     # Soft delete
     user.is_active = False
     db.session.commit()
-    
+
     create_audit_log('users', user.id, 'delete', {'is_active': True}, {'is_active': False})
-    
+    log_activity(
+        activity_type=ActivityType.DELETE,
+        entity_type=EntityType.USER,
+        entity_id=user.id,
+        description=f"Deleted user: {user.full_name}"
+    )
+
     return success_response({'message': 'User deleted successfully'})
 
 
@@ -327,9 +353,15 @@ def update_user_roles(user_id):
                 user_id=user.id,
                 role_id=role.id
             ))
-    
+
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.USER,
+        entity_id=user.id,
+        description=f"Updated roles for user: {user.full_name}"
+    )
+
     return success_response({'message': 'User roles updated successfully'})
 
 
@@ -406,9 +438,15 @@ def create_role():
                 role_id=role.id,
                 permission_id=perm.id
             ))
-    
+
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        entity_type=EntityType.USER,
+        entity_id=role.id,
+        description=f"Created role: {role.name}"
+    )
+
     return success_response({
         'id': role.id,
         'name': role.name,
@@ -475,9 +513,15 @@ def update_role(role_id):
                     role_id=role.id,
                     permission_id=perm.id
                 ))
-    
+
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.USER,
+        entity_id=role.id,
+        description=f"Updated role: {role.name}"
+    )
+
     return success_response({'message': 'Role updated successfully'})
 
 
@@ -507,11 +551,19 @@ def delete_role(role_id):
     
     # Delete role permissions first
     db.session.execute(role_permissions.delete().where(role_permissions.c.role_id == role.id))
-    
+
+    role_name = role.name
+    role_id = role.id
     # Delete role
     db.session.delete(role)
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.DELETE,
+        entity_type=EntityType.USER,
+        entity_id=role_id,
+        description=f"Deleted role: {role_name}"
+    )
+
     return success_response({'message': 'Role deleted successfully'})
 
 

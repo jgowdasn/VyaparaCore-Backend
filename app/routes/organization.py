@@ -11,6 +11,7 @@ from app.utils.helpers import (
     success_response, error_response, get_request_json,
     paginate, get_filters, apply_filters, model_to_dict
 )
+from app.services.activity_logger import log_activity, log_audit, ActivityType, EntityType
 
 organization_bp = Blueprint('organization', __name__)
 
@@ -65,8 +66,14 @@ def update_organization():
     org.updated_at = datetime.utcnow()
     
     create_audit_log('organizations', org.id, 'update', old_values, model_to_dict(org))
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.USER,
+        entity_id=org.id,
+        description=f"Updated organization settings"
+    )
     db.session.commit()
-    
+
     return success_response(model_to_dict(org), 'Organization updated')
 
 
@@ -130,7 +137,13 @@ def create_branch():
     db.session.commit()
     
     create_audit_log('branches', branch.id, 'create', None, model_to_dict(branch))
-    
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        entity_type=EntityType.USER,
+        entity_id=branch.id,
+        description=f"Created branch: {branch.name}"
+    )
+
     return success_response(model_to_dict(branch), 'Branch created', 201)
 
 
@@ -174,8 +187,14 @@ def update_branch(id):
     branch.updated_at = datetime.utcnow()
     
     create_audit_log('branches', branch.id, 'update', old_values, model_to_dict(branch))
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.USER,
+        entity_id=branch.id,
+        description=f"Updated branch: {branch.name}"
+    )
     db.session.commit()
-    
+
     return success_response(model_to_dict(branch), 'Branch updated')
 
 
@@ -192,8 +211,14 @@ def delete_branch(id):
     branch.updated_at = datetime.utcnow()
     
     create_audit_log('branches', branch.id, 'delete', model_to_dict(branch), None)
+    log_activity(
+        activity_type=ActivityType.DELETE,
+        entity_type=EntityType.USER,
+        entity_id=branch.id,
+        description=f"Deleted branch: {branch.name}"
+    )
     db.session.commit()
-    
+
     return success_response(message='Branch deleted')
 
 
@@ -275,7 +300,13 @@ def update_org_settings():
     
     settings.updated_at = datetime.utcnow()
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.USER,
+        entity_id=settings.id,
+        description=f"Updated organization settings"
+    )
+
     return success_response(model_to_dict(settings), 'Settings updated')
 
 
@@ -308,5 +339,11 @@ def update_invoice_settings():
     
     settings.updated_at = datetime.utcnow()
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.USER,
+        entity_id=settings.id,
+        description=f"Updated invoice settings"
+    )
+
     return success_response(model_to_dict(settings), 'Invoice settings updated')

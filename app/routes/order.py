@@ -14,6 +14,7 @@ from app.utils.helpers import (
     success_response, error_response, get_request_json,
     paginate, get_filters, apply_filters, model_to_dict
 )
+from app.services.activity_logger import log_activity, log_audit, ActivityType, EntityType
 
 order_bp = Blueprint('order', __name__)
 
@@ -47,6 +48,16 @@ def list_sales_orders():
         data['customer_name'] = o.customer.name if o.customer else o.customer_name
         data['total_amount'] = float(o.grand_total or 0)
         data['items_count'] = o.items.count() if o.items else 0
+        # Include invoice info if exists
+        invoice = o.invoices.first()
+        if invoice:
+            data['invoice'] = {
+                'id': invoice.id,
+                'invoice_number': invoice.invoice_number,
+                'status': invoice.status
+            }
+        else:
+            data['invoice'] = None
         return data
     
     return success_response(paginate(query, serialize))
@@ -99,6 +110,7 @@ def create_sales_order():
         currency=data.get('currency', 'INR'),
         payment_terms=data.get('payment_terms', customer.payment_terms),
         advance_amount=data.get('advance_amount', 0),
+        delivery_method=data.get('shipping_method') or data.get('delivery_method'),
         notes=sanitize_string(data.get('notes', '')),
         status='draft',
         created_by=g.current_user.id
@@ -200,7 +212,13 @@ def create_sales_order():
     db.session.commit()
     
     create_audit_log('sales_orders', order.id, 'create', None, model_to_dict(order))
-    
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        entity_type=EntityType.SALES_ORDER,
+        entity_id=order.id,
+        description=f"Created sales order {order.order_number} for {customer.name}"
+    )
+
     return success_response(model_to_dict(order), 'Sales order created', 201)
 
 
@@ -216,7 +234,7 @@ def get_sales_order(id):
     data = model_to_dict(order)
     data['customer'] = model_to_dict(order.customer) if order.customer else None
     data['items'] = []
-    
+
     for item in order.items:
         item_data = model_to_dict(item)
         item_data['product'] = {
@@ -225,7 +243,20 @@ def get_sales_order(id):
             'sku': item.product.sku
         } if item.product else None
         data['items'].append(item_data)
-    
+
+    # Include invoice information if exists
+    invoice = order.invoices.first()
+    if invoice:
+        data['invoice'] = {
+            'id': invoice.id,
+            'invoice_number': invoice.invoice_number,
+            'status': invoice.status,
+            'payment_status': invoice.payment_status,
+            'total_amount': float(invoice.total_amount or 0)
+        }
+    else:
+        data['invoice'] = None
+
     return success_response(data)
 
 
@@ -242,11 +273,15 @@ def update_sales_order(id):
         return error_response('Cannot edit order in current status')
     
     data = get_request_json()
-    
+
     updateable = ['expected_delivery_date', 'payment_terms', 'advance_amount', 'notes',
-                  'shipping_address_line1', 'shipping_address_line2', 'shipping_city',
-                  'shipping_state', 'shipping_state_code', 'shipping_pincode']
-    
+                  'delivery_method', 'shipping_address_line1', 'shipping_address_line2',
+                  'shipping_city', 'shipping_state', 'shipping_state_code', 'shipping_pincode']
+
+    # Handle shipping_method from frontend mapping to delivery_method
+    if 'shipping_method' in data:
+        order.delivery_method = data['shipping_method']
+
     for field in updateable:
         if field in data:
             setattr(order, field, data[field])
@@ -254,7 +289,13 @@ def update_sales_order(id):
     order.updated_at = datetime.utcnow()
     order.updated_by = g.current_user.id
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.SALES_ORDER,
+        entity_id=order.id,
+        description=f"Updated sales order {order.order_number}"
+    )
+
     return success_response(model_to_dict(order), 'Sales order updated')
 
 
@@ -262,27 +303,118 @@ def update_sales_order(id):
 @jwt_required_with_user()
 @permission_required('sales_orders.approve')
 def confirm_sales_order(id):
-    """Confirm sales order"""
+    """Confirm sales order and reserve stock"""
     order = SalesOrder.query.filter_by(id=id, organization_id=g.organization_id).first()
     if not order:
         return error_response('Sales order not found', status_code=404)
-    
+
     if order.status != 'draft':
         return error_response('Only draft orders can be confirmed')
-    
+
+    # Check and reserve stock if warehouse is specified
+    if order.warehouse_id:
+        insufficient_items = []
+        items_to_reserve = []
+
+        for item in order.items:
+            if not item.product_id:
+                continue
+
+            product = Product.query.get(item.product_id)
+            if not product or not product.track_inventory:
+                continue
+
+            # Find stock record
+            stock = Stock.query.filter_by(
+                product_id=item.product_id,
+                variant_id=item.variant_id,
+                warehouse_id=order.warehouse_id
+            ).first()
+
+            qty_needed = float(item.quantity or 0)
+            available = 0
+
+            if stock:
+                available = float(stock.quantity or 0) - float(stock.reserved_quantity or 0)
+
+            if available < qty_needed:
+                insufficient_items.append({
+                    'product': item.name,
+                    'required': qty_needed,
+                    'available': available
+                })
+            else:
+                items_to_reserve.append({
+                    'item': item,
+                    'product': product,
+                    'stock': stock,
+                    'quantity': qty_needed
+                })
+
+        # If any items have insufficient stock, return error
+        if insufficient_items:
+            return error_response(
+                'Insufficient stock for some items',
+                errors={'insufficient_items': insufficient_items},
+                status_code=400
+            )
+
+        # Reserve stock for all items
+        txn_count = StockTransaction.query.filter_by(
+            organization_id=g.organization_id
+        ).count()
+
+        for idx, reserve_item in enumerate(items_to_reserve):
+            stock = reserve_item['stock']
+            qty = reserve_item['quantity']
+            item = reserve_item['item']
+
+            # Update reserved quantity
+            balance_before = float(stock.reserved_quantity or 0)
+            stock.reserved_quantity = balance_before + qty
+            stock.available_quantity = float(stock.quantity or 0) - stock.reserved_quantity
+
+            # Create reservation transaction
+            txn = StockTransaction(
+                organization_id=g.organization_id,
+                transaction_number=f"RES{datetime.utcnow().strftime('%y%m')}{txn_count + idx + 1:05d}",
+                product_id=item.product_id,
+                variant_id=item.variant_id,
+                warehouse_id=order.warehouse_id,
+                transaction_type='reservation',
+                quantity=qty,
+                direction='reserve',
+                balance_before=balance_before,
+                balance_after=stock.reserved_quantity,
+                reference_type='sales_order',
+                reference_id=order.id,
+                reference_number=order.order_number,
+                transaction_date=datetime.utcnow(),
+                created_by=g.current_user.id,
+                notes=f"Reserved for Sales Order {order.order_number}"
+            )
+            db.session.add(txn)
+
     order.status = 'confirmed'
     order.confirmed_at = datetime.utcnow()
     order.updated_at = datetime.utcnow()
     db.session.commit()
-    
-    return success_response(model_to_dict(order), 'Sales order confirmed')
+
+    log_activity(
+        activity_type=ActivityType.STATUS_CHANGE,
+        entity_type=EntityType.SALES_ORDER,
+        entity_id=order.id,
+        description=f"Confirmed sales order {order.order_number}"
+    )
+
+    return success_response(model_to_dict(order), 'Sales order confirmed and stock reserved')
 
 
 @order_bp.route('/sales/<int:id>/cancel', methods=['POST'])
 @jwt_required_with_user()
 @permission_required('sales_orders.cancel')
 def cancel_sales_order(id):
-    """Cancel sales order"""
+    """Cancel sales order and release reserved stock"""
     order = SalesOrder.query.filter_by(id=id, organization_id=g.organization_id).first()
     if not order:
         return error_response('Sales order not found', status_code=404)
@@ -292,13 +424,95 @@ def cancel_sales_order(id):
 
     data = get_request_json()
 
+    # Release reserved stock if order was confirmed and has warehouse
+    if order.status == 'confirmed' and order.warehouse_id:
+        txn_count = StockTransaction.query.filter_by(
+            organization_id=g.organization_id
+        ).count()
+
+        for idx, item in enumerate(order.items):
+            if not item.product_id:
+                continue
+
+            product = Product.query.get(item.product_id)
+            if not product or not product.track_inventory:
+                continue
+
+            stock = Stock.query.filter_by(
+                product_id=item.product_id,
+                variant_id=item.variant_id,
+                warehouse_id=order.warehouse_id
+            ).first()
+
+            if stock and float(stock.reserved_quantity or 0) > 0:
+                qty_to_release = min(float(item.quantity or 0), float(stock.reserved_quantity or 0))
+                balance_before = float(stock.reserved_quantity or 0)
+
+                stock.reserved_quantity = max(0, balance_before - qty_to_release)
+                stock.available_quantity = float(stock.quantity or 0) - float(stock.reserved_quantity or 0)
+
+                # Create release transaction
+                txn = StockTransaction(
+                    organization_id=g.organization_id,
+                    transaction_number=f"REL{datetime.utcnow().strftime('%y%m')}{txn_count + idx + 1:05d}",
+                    product_id=item.product_id,
+                    variant_id=item.variant_id,
+                    warehouse_id=order.warehouse_id,
+                    transaction_type='reservation_release',
+                    quantity=qty_to_release,
+                    direction='release',
+                    balance_before=balance_before,
+                    balance_after=stock.reserved_quantity,
+                    reference_type='sales_order',
+                    reference_id=order.id,
+                    reference_number=order.order_number,
+                    transaction_date=datetime.utcnow(),
+                    created_by=g.current_user.id,
+                    notes=f"Released reservation for cancelled Sales Order {order.order_number}"
+                )
+                db.session.add(txn)
+
     order.status = 'cancelled'
     order.cancellation_reason = sanitize_string(data.get('reason', ''))
     order.cancelled_at = datetime.utcnow()
     order.updated_at = datetime.utcnow()
     db.session.commit()
 
-    return success_response(model_to_dict(order), 'Sales order cancelled')
+    log_activity(
+        activity_type=ActivityType.STATUS_CHANGE,
+        entity_type=EntityType.SALES_ORDER,
+        entity_id=order.id,
+        description=f"Cancelled sales order {order.order_number}"
+    )
+
+    return success_response(model_to_dict(order), 'Sales order cancelled and stock released')
+
+
+@order_bp.route('/sales/<int:id>/ship', methods=['POST'])
+@jwt_required_with_user()
+@permission_required('sales_orders.edit')
+def ship_sales_order(id):
+    """Mark sales order as shipped"""
+    order = SalesOrder.query.filter_by(id=id, organization_id=g.organization_id).first()
+    if not order:
+        return error_response('Sales order not found', status_code=404)
+
+    if order.status not in ['confirmed', 'processing']:
+        return error_response('Only confirmed or processing orders can be marked as shipped')
+
+    order.status = 'shipped'
+    order.shipped_at = datetime.utcnow()
+    order.updated_at = datetime.utcnow()
+    db.session.commit()
+
+    log_activity(
+        activity_type=ActivityType.STATUS_CHANGE,
+        entity_type=EntityType.SALES_ORDER,
+        entity_id=order.id,
+        description=f"Marked sales order {order.order_number} as shipped"
+    )
+
+    return success_response(model_to_dict(order), 'Sales order marked as shipped')
 
 
 @order_bp.route('/sales/<int:id>/invoice', methods=['POST'])
@@ -312,8 +526,8 @@ def convert_sales_order_to_invoice(id):
     if not order:
         return error_response('Sales order not found', status_code=404)
 
-    if order.status not in ['confirmed', 'processing']:
-        return error_response('Only confirmed orders can be converted to invoice')
+    if order.status not in ['confirmed', 'processing', 'shipped']:
+        return error_response('Only confirmed, processing or shipped orders can be converted to invoice')
 
     # Check if already converted
     existing_invoice = Invoice.query.filter_by(sales_order_id=order.id).first()
@@ -419,6 +633,69 @@ def convert_sales_order_to_invoice(id):
         )
         db.session.add(invoice_item)
 
+    # Deduct stock from reserved quantity (reserved when SO was confirmed)
+    if order.warehouse_id:
+        txn_count = StockTransaction.query.filter_by(
+            organization_id=g.organization_id
+        ).count()
+
+        for idx, order_item in enumerate(order.items):
+            if not order_item.product_id:
+                continue
+
+            product = Product.query.get(order_item.product_id)
+            if not product or not product.track_inventory:
+                continue
+
+            stock = Stock.query.filter_by(
+                product_id=order_item.product_id,
+                variant_id=order_item.variant_id,
+                warehouse_id=order.warehouse_id
+            ).first()
+
+            if stock:
+                qty = float(order_item.quantity or 0)
+
+                # Release from reserved and deduct from actual stock
+                reserved_before = float(stock.reserved_quantity or 0)
+                qty_before = float(stock.quantity or 0)
+
+                # Release reservation
+                release_qty = min(qty, reserved_before)
+                stock.reserved_quantity = max(0, reserved_before - release_qty)
+
+                # Deduct from actual stock
+                stock.quantity = max(0, qty_before - qty)
+                stock.available_quantity = float(stock.quantity) - float(stock.reserved_quantity)
+
+                # Create sale transaction
+                txn = StockTransaction(
+                    organization_id=g.organization_id,
+                    transaction_number=f"SALE{datetime.utcnow().strftime('%y%m')}{txn_count + idx + 1:05d}",
+                    product_id=order_item.product_id,
+                    variant_id=order_item.variant_id,
+                    warehouse_id=order.warehouse_id,
+                    transaction_type='sale',
+                    quantity=qty,
+                    direction='out',
+                    balance_before=qty_before,
+                    balance_after=float(stock.quantity),
+                    unit_cost=float(order_item.rate or 0),
+                    reference_type='invoice',
+                    reference_id=invoice.id,
+                    reference_number=invoice.invoice_number,
+                    transaction_date=datetime.utcnow(),
+                    created_by=g.current_user.id,
+                    notes=f"Sale via Invoice {invoice.invoice_number} from SO {order.order_number}"
+                )
+                db.session.add(txn)
+
+                # Update product denormalized stock
+                total_stock = db.session.query(db.func.sum(Stock.quantity)).filter_by(
+                    product_id=order_item.product_id
+                ).scalar() or 0
+                product.current_stock = float(total_stock)
+
     # Update sales order status
     order.status = 'processing'
     order.updated_at = datetime.utcnow()
@@ -426,6 +703,12 @@ def convert_sales_order_to_invoice(id):
     db.session.commit()
 
     create_audit_log('invoices', invoice.id, 'create', None, {'source': 'sales_order', 'sales_order_id': order.id})
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        entity_type=EntityType.INVOICE,
+        entity_id=invoice.id,
+        description=f"Created invoice {invoice.invoice_number} from sales order {order.order_number}"
+    )
 
     return success_response({'invoice_id': invoice.id, 'invoice_number': invoice.invoice_number}, 'Invoice created from sales order', 201)
 
@@ -646,7 +929,13 @@ def create_purchase_order():
     db.session.commit()
 
     create_audit_log('purchase_orders', order.id, 'create', None, model_to_dict(order))
-    
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        entity_type=EntityType.PURCHASE_ORDER,
+        entity_id=order.id,
+        description=f"Created purchase order {order.order_number} for {supplier.name}"
+    )
+
     return success_response(model_to_dict(order), 'Purchase order created', 201)
 
 
@@ -838,6 +1127,12 @@ def update_purchase_order(id):
     order.updated_at = datetime.utcnow()
     order.updated_by = g.current_user.id
     db.session.commit()
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.PURCHASE_ORDER,
+        entity_id=order.id,
+        description=f"Updated purchase order {order.order_number}"
+    )
 
     return success_response(model_to_dict(order), 'Purchase order updated')
 
@@ -857,8 +1152,16 @@ def delete_purchase_order(id):
     # Delete items first
     PurchaseOrderItem.query.filter_by(order_id=order.id).delete()
 
+    order_number = order.order_number
+    order_id = order.id
     db.session.delete(order)
     db.session.commit()
+    log_activity(
+        activity_type=ActivityType.DELETE,
+        entity_type=EntityType.PURCHASE_ORDER,
+        entity_id=order_id,
+        description=f"Deleted purchase order {order_number}"
+    )
 
     return success_response(None, 'Purchase order deleted')
 
@@ -880,7 +1183,13 @@ def approve_purchase_order(id):
     order.approved_at = datetime.utcnow()
     order.updated_at = datetime.utcnow()
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.STATUS_CHANGE,
+        entity_type=EntityType.PURCHASE_ORDER,
+        entity_id=order.id,
+        description=f"Approved purchase order {order.order_number}"
+    )
+
     return success_response(model_to_dict(order), 'Purchase order approved')
 
 
@@ -983,9 +1292,15 @@ def receive_purchase_order(id):
     order.status = 'received' if all_received else 'partial'
     order.received_at = datetime.utcnow() if all_received else order.received_at
     order.updated_at = datetime.utcnow()
-    
+
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.STATUS_CHANGE,
+        entity_type=EntityType.PURCHASE_ORDER,
+        entity_id=order.id,
+        description=f"Received goods for purchase order {order.order_number}"
+    )
+
     return success_response(model_to_dict(order), 'Goods received')
 
 
@@ -1008,5 +1323,11 @@ def cancel_purchase_order(id):
     order.cancelled_at = datetime.utcnow()
     order.updated_at = datetime.utcnow()
     db.session.commit()
-    
+    log_activity(
+        activity_type=ActivityType.STATUS_CHANGE,
+        entity_type=EntityType.PURCHASE_ORDER,
+        entity_id=order.id,
+        description=f"Cancelled purchase order {order.order_number}"
+    )
+
     return success_response(model_to_dict(order), 'Purchase order cancelled')

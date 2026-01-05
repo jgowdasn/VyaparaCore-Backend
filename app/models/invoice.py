@@ -304,7 +304,7 @@ class CreditNote(db.Model):
     
     # Relationships
     customer = db.relationship('Customer', foreign_keys=[customer_id])
-    original_invoice = db.relationship('Invoice', foreign_keys=[invoice_id])
+    original_invoice = db.relationship('Invoice', foreign_keys=[invoice_id], overlaps="credit_notes,invoice")
     items = db.relationship('CreditNoteItem', backref='credit_note', lazy='dynamic',
                            cascade='all, delete-orphan')
 

@@ -1,0 +1,34 @@
+# Render Blueprint - VyaparaCore Backend
+# Deploy: Connect this repo to Render → New Blueprint
+
+databases:
+  - name: vyapara-db
+    databaseName: vyapara
+    user: vyapara
+    plan: free
+    region: singapore
+
+services:
+  - type: web
+    name: vyapara-api
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt && flask db upgrade
+    startCommand: gunicorn run:app --bind 0.0.0.0:$PORT --workers 2
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: vyapara-db
+          property: connectionString
+      - key: CORS_ORIGINS
+        sync: false  # Set manually after frontend deploys
+      - key: PYTHON_VERSION
+        value: 3.11.0
+    healthCheckPath: /api/health

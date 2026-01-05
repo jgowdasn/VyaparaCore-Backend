@@ -14,9 +14,11 @@ def get_engine_options():
 class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'your-secret-key-change-in-production'
 
-    # Database
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
-        'postgresql://postgres:postgres@localhost:5432/vyaparacore'
+    # Database - Handle Render's postgres:// URL format (SQLAlchemy needs postgresql://)
+    _db_url = os.environ.get('DATABASE_URL') or 'sqlite:///vyaparacore.db'
+    if _db_url.startswith('postgres://'):
+        _db_url = _db_url.replace('postgres://', 'postgresql://', 1)
+    SQLALCHEMY_DATABASE_URI = _db_url
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = get_engine_options()
     

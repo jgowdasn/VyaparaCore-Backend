@@ -77,7 +77,7 @@ class Quotation(db.Model):
     
     # Conversion Tracking
     converted_to_order = db.Column(db.Boolean, default=False)
-    sales_order_id = db.Column(db.Integer, db.ForeignKey('sales_orders.id'))
+    sales_order_id = db.Column(db.Integer, db.ForeignKey('sales_orders.id', use_alter=True, name='fk_quotation_sales_order'))
     
     # Notes
     subject = db.Column(db.String(500))

@@ -13,6 +13,7 @@ from app.utils.helpers import (
     success_response, error_response, get_request_json,
     paginate, get_filters, apply_filters, model_to_dict
 )
+from app.services.activity_logger import log_activity, log_audit, ActivityType, EntityType
 
 product_bp = Blueprint('product', __name__)
 
@@ -76,7 +77,15 @@ def create_category():
     
     db.session.add(category)
     db.session.commit()
-    
+
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        description=f"Created category '{category.name}'",
+        entity_type=EntityType.CATEGORY,
+        entity_id=category.id,
+        entity_number=category.code
+    )
+
     return success_response(model_to_dict(category), 'Category created', 201)
 
 
@@ -480,9 +489,16 @@ def create_product():
             db.session.add(image)
     
     db.session.commit()
-    
-    create_audit_log('products', product.id, 'create', None, model_to_dict(product))
-    
+
+    log_audit('products', product.id, 'create', None, model_to_dict(product))
+    log_activity(
+        activity_type=ActivityType.CREATE,
+        description=f"Created product '{product.name}' ({product.sku})",
+        entity_type=EntityType.PRODUCT,
+        entity_id=product.id,
+        entity_number=product.sku
+    )
+
     return success_response(model_to_dict(product), 'Product created', 201)
 
 
@@ -537,10 +553,18 @@ def update_product(id):
     
     product.updated_at = datetime.utcnow()
     product.updated_by = g.current_user.id
-    
-    create_audit_log('products', product.id, 'update', old_values, model_to_dict(product))
+
+    log_audit('products', product.id, 'update', old_values, model_to_dict(product))
     db.session.commit()
-    
+
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        description=f"Updated product '{product.name}' ({product.sku})",
+        entity_type=EntityType.PRODUCT,
+        entity_id=product.id,
+        entity_number=product.sku
+    )
+
     return success_response(model_to_dict(product), 'Product updated')
 
 
@@ -558,10 +582,18 @@ def delete_product(id):
     
     product.is_active = False
     product.updated_at = datetime.utcnow()
-    
-    create_audit_log('products', product.id, 'delete', model_to_dict(product), None)
+
+    log_audit('products', product.id, 'delete', model_to_dict(product), None)
     db.session.commit()
-    
+
+    log_activity(
+        activity_type=ActivityType.DELETE,
+        description=f"Deleted product '{product.name}' ({product.sku})",
+        entity_type=EntityType.PRODUCT,
+        entity_id=product.id,
+        entity_number=product.sku
+    )
+
     return success_response(message='Product deleted')
 
 
