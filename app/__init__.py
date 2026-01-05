@@ -101,9 +101,8 @@ def create_app(config_class=Config):
     def run_seed():
         from flask import request
         secret = request.args.get('key', '')
-        # Use your full SECRET_KEY as seed password
-        expected = app.config.get('SECRET_KEY', '')
-        if secret != expected:
+        # Simple fixed seed key - DELETE THIS ENDPOINT AFTER SEEDING
+        if secret != 'vyapara2024seed':
             return jsonify({'error': 'Invalid secret'}), 403
         try:
             from seeds import run_all_seeds
