@@ -386,6 +386,31 @@ def get_invoice(id):
         db.session.commit()
 
     data['customer'] = model_to_dict(invoice.customer) if invoice.customer else None
+
+    # Include organization data with logo for invoice print
+    org = Organization.query.get(g.organization_id)
+    if org:
+        data['organization'] = {
+            'id': org.id,
+            'name': org.name,
+            'legal_name': org.legal_name,
+            'logo_url': org.logo_url,
+            'logo_data': org.logo_data,
+            'gstin': org.gstin,
+            'pan': org.pan,
+            'email': org.email,
+            'phone': org.phone,
+            'address_line1': org.address_line1,
+            'address_line2': org.address_line2,
+            'city': org.city,
+            'state': org.state,
+            'pincode': org.pincode,
+            'bank_name': org.bank_name,
+            'bank_account_number': org.bank_account_number,
+            'bank_ifsc': org.bank_ifsc,
+            'bank_branch': org.bank_branch,
+        }
+
     data['items'] = []
 
     for item in invoice.items:

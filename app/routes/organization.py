@@ -44,10 +44,23 @@ def update_organization():
     updateable = [
         'name', 'legal_name', 'organization_type', 'industry', 'email', 'phone',
         'website', 'gstin', 'pan', 'cin', 'tan', 'address_line1', 'address_line2',
-        'city', 'state', 'state_code', 'country', 'pincode', 'logo_url',
+        'city', 'state', 'state_code', 'country', 'pincode', 'logo_url', 'logo_data',
         'bank_name', 'bank_account_number', 'bank_ifsc', 'bank_branch'
     ]
-    
+
+    # Validate logo_data if provided
+    if 'logo_data' in data and data['logo_data']:
+        logo_data = data['logo_data']
+        if not logo_data.startswith('data:image/'):
+            return error_response('Invalid image format. Must be a data URL.')
+        allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+        mime_match = logo_data.split(';')[0].replace('data:', '')
+        if mime_match not in allowed_types:
+            return error_response('Invalid image type. Allowed: jpg, png, gif, webp')
+        max_size = 700000  # ~500KB in base64
+        if len(logo_data) > max_size:
+            return error_response('Logo too large. Maximum size is 500KB.')
+
     for field in updateable:
         if field in data:
             value = data[field]
@@ -75,6 +88,77 @@ def update_organization():
     db.session.commit()
 
     return success_response(model_to_dict(org), 'Organization updated')
+
+
+@organization_bp.route('/logo', methods=['POST'])
+@jwt_required_with_user()
+@permission_required('organization.edit')
+def upload_logo():
+    """Upload organization logo as base64"""
+    org = Organization.query.get(g.organization_id)
+    if not org:
+        return error_response('Organization not found', status_code=404)
+
+    data = get_request_json()
+    logo_data = data.get('logo_data')
+
+    if not logo_data:
+        return error_response('No logo data provided')
+
+    # Validation
+    if not logo_data.startswith('data:image/'):
+        return error_response('Invalid image format. Must be a data URL.')
+
+    allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+    mime_match = logo_data.split(';')[0].replace('data:', '')
+    if mime_match not in allowed_types:
+        return error_response('Invalid image type. Allowed: jpg, png, gif, webp')
+
+    max_size = 700000  # ~500KB in base64
+    if len(logo_data) > max_size:
+        return error_response('Logo too large. Maximum size is 500KB.')
+
+    old_values = model_to_dict(org)
+    org.logo_data = logo_data
+    org.logo_url = None  # Clear external URL when using base64
+    org.updated_at = datetime.utcnow()
+
+    create_audit_log('organizations', org.id, 'update', old_values, model_to_dict(org))
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.USER,
+        entity_id=org.id,
+        description="Updated organization logo"
+    )
+    db.session.commit()
+
+    return success_response({'logo_data': logo_data}, 'Logo uploaded successfully')
+
+
+@organization_bp.route('/logo', methods=['DELETE'])
+@jwt_required_with_user()
+@permission_required('organization.edit')
+def delete_logo():
+    """Remove organization logo"""
+    org = Organization.query.get(g.organization_id)
+    if not org:
+        return error_response('Organization not found', status_code=404)
+
+    old_values = model_to_dict(org)
+    org.logo_data = None
+    org.logo_url = None
+    org.updated_at = datetime.utcnow()
+
+    create_audit_log('organizations', org.id, 'update', old_values, model_to_dict(org))
+    log_activity(
+        activity_type=ActivityType.UPDATE,
+        entity_type=EntityType.USER,
+        entity_id=org.id,
+        description="Removed organization logo"
+    )
+    db.session.commit()
+
+    return success_response(message='Logo removed successfully')
 
 
 # Branch routes

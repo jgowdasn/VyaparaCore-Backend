@@ -36,6 +36,7 @@ class Organization(db.Model):
     
     # Branding
     logo_url = db.Column(db.String(500))
+    logo_data = db.Column(db.Text)  # Base64 encoded logo image
     signature_url = db.Column(db.String(500))
     
     # Currency & Locale
